@@ -1,0 +1,6 @@
+@MoreScrapperAPI_HostAddress = http://localhost:5273
+
+GET {{MoreScrapperAPI_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
