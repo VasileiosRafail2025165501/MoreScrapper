@@ -9,28 +9,27 @@ public class ScraperController : ControllerBase
 {
     private readonly ScraperService _scraperService;
 
-    // Dependency Injection του service
     public ScraperController(ScraperService scraperService)
     {
         _scraperService = scraperService;
     }
 
-    [HttpGet("scrape")]
-    public async Task<IActionResult> ScrapeUrl([FromQuery] string url)
+    [HttpPost("scrape")] // Χρησιμοποιούμε POST για να δεχτούμε Body
+    public async Task<IActionResult> ScrapeUrl([FromBody] ScrapeRequest request)
     {
-        if (string.IsNullOrWhiteSpace(url))
+        if (request == null)
         {
-            return BadRequest("Το URL είναι υποχρεωτικό.");
+            return BadRequest("Το σώμα της αίτησης (body) δεν μπορεί να είναι κενό.");
         }
 
         try
         {
-            var result = await _scraperService.ScrapeWebsiteAsync(url);
+            // Περνάμε ολόκληρο το αντικείμενο request που περιέχει τα location και category
+            var result = await _scraperService.ScrapeWebsiteAsync(request);
             return Ok(result);
         }
         catch (Exception ex)
         {
-            // Προσοχή: Σε production δεν γυρνάμε το ex.Message απευθείας, αλλά για development βοηθάει
             return StatusCode(500, $"Σφάλμα κατά το scraping: {ex.Message}");
         }
     }
