@@ -14,7 +14,7 @@ public class ScraperController : ControllerBase
         _scraperService = scraperService;
     }
 
-    [HttpPost("scrape")] // Χρησιμοποιούμε POST για να δεχτούμε Body
+    [HttpPost("scrape")] 
     public async Task<IActionResult> ScrapeUrl([FromBody] ScrapeRequest request)
     {
         if (request == null)
@@ -24,7 +24,6 @@ public class ScraperController : ControllerBase
 
         try
         {
-            // Περνάμε ολόκληρο το αντικείμενο request που περιέχει τα location και category
             var result = await _scraperService.ScrapeWebsiteAsync(request);
             return Ok(result);
         }
