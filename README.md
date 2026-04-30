@@ -1,87 +1,176 @@
-# 🎭 MoreScrapperAPI
-**MoreScrapperAPI** is a .NET 8 Web API that uses Microsoft Playwright to dynamically scrape theater event data from more.com. It accepts specific search criteria (like category and location), navigates the website, handles cookies and UI interactions, and returns a structured JSON response containing detailed information about the events.
-## ✨ Features
- * **Dynamic Web Scraping:** Uses a real Chromium browser via Playwright to ensure all dynamic JavaScript content is fully loaded.
- * **Automated Navigation:** Automatically accepts cookies, selects the correct country/region, and applies user-defined filters (Category & Location).
- * **Deep Extraction:** Opens individual event tabs to extract:
-   * Title
-   * Event URL & Image URL
-   * Location / Venue Name
-   * Detailed Description (About)
-   * Date range
-   * Duration
-   * Google Maps Link
- * **Swagger UI:** Built-in Swagger interface for easy API testing and exploration.
-## 🛠️ Tech Stack
- * **Framework:** C# / .NET 8.0
- * **Scraping Engine:** Microsoft Playwright
- * **API Documentation:** Swashbuckle (Swagger)
-## 🚀 Getting Started
+# 🎭 More.com Theater Scraper API
+
+A .NET Web API that uses **Microsoft Playwright** to scrape theater event listings from [more.com](https://www.more.com/el/theater/). It supports filtering by **category** and **location**, and returns structured event data including titles, descriptions, dates, images (as Base64), and GPS coordinates.
+
+---
+
+## Features
+
+- Scrapes live theater listings from more.com using a real headless browser
+- Filter events by **genre/category** (e.g. Drama, Comedy, Musical)
+- Filter events by **location/region** (e.g. Athens, Thessaloniki, Crete)
+- Returns rich per-event data: title, description, date, duration, venue, map URL, coordinates, and image (URL + Base64)
+- Handles cookie consent popups and dynamic page loads automatically
+- Built with ASP.NET Core and Swagger UI
+
+---
+
+## Tech Stack
+
+- [.NET 8+](https://dotnet.microsoft.com/) — ASP.NET Core Web API
+- [Microsoft Playwright for .NET](https://playwright.dev/dotnet/) — headless browser automation
+- Swagger / OpenAPI — interactive API docs
+
+---
+
+## Getting Started
+
 ### Prerequisites
- 1. .NET 8.0 SDK installed on your machine.
- 2. PowerShell (required to install Playwright browser binaries).
+
+- [.NET 8 SDK](https://dotnet.microsoft.com/download)
+- Playwright browsers installed
+
 ### Installation
- 1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/yourusername/MoreScrapperAPI.git
-   cd MoreScrapperAPI
-   
-   ```
- 2. **Build the project:**
-   ```bash
-   dotnet build
-   
-   ```
- 3. **Install Playwright Browsers:**
-   Because Playwright requires specific browser binaries to run, you must install them after your first build:
-   ```bash
-   pwsh bin/Debug/net8.0/playwright.ps1 install
-   
-   ```
- 4. **Run the API:**
-   ```bash
-   dotnet run
-   
-   ```
-## 📖 API Usage
-Once the application is running, open your browser and navigate to http://localhost:<port>/swagger to access the Swagger UI.
-### Endpoint: POST /api/scraper/scrape
-**Request Body (ScrapeRequest):**
+
+```bash
+# Clone the repository
+git clone https://github.com/your-username/your-repo-name.git
+cd your-repo-name
+
+# Restore dependencies
+dotnet restore
+
+# Install Playwright browsers
+dotnet build
+pwsh bin/Debug/net8.0/playwright.ps1 install
+```
+
+### Running the API
+
+```bash
+dotnet run
+```
+
+The API will be available at:
+- `http://localhost:5273`
+- `https://localhost:7228`
+
+Swagger UI is available at: `https://localhost:7228/swagger`
+
+---
+
+## API Reference
+
+### `POST /api/scraper/scrape`
+
+Scrapes theater events from more.com with optional filters.
+
+**Request Body**
+
 ```json
 {
-  "location": "Θεσσαλονίκη",
+  "location": "Αττική",
   "category": "Κωμωδία"
 }
-
 ```
-*(Leave strings empty "" to scrape all available categories/locations).*
-**Success Response (200 OK):**
+
+Both fields are optional. Omitting them scrapes all available events.
+
+**Response**
+
 ```json
 {
   "url": "https://www.more.com/el/theater/",
-  "message": "Επιτυχής εξαγωγή 1 παραστάσεων.",
-  "totalEventsScraped": 1,
+  "message": "Successfully scraped 12 events.",
+  "totalEventsScraped": 12,
   "events": [
     {
-      "title": "Όλα Μόνοι Μας στη Θεσσαλονίκη",
-      "url": "https://www.more.com/gr-el/tickets/theater/ola-monoi-mas-1/",
-      "imageUrl": "https://www.more.com/getattachment/.../image.png",
-      "locationName": "Θέατρο Τεχνών Θεσσαλονίκης, Κωνσταντινουπόλεως 75",
-      "about": "Μετά από δύο μαγικές FULL HOUSE βραδιές μες στο Μάρτη...",
-      "date": "28 Οκτ - 20 Δεκ 2026",
-      "duration": "90'",
-      "mapUrl": "https://maps.google.com/maps?ll=38.010683,23.735833&z=15&t=m&hl=en&gl=GR&mapclient=embed&cid=13177469685007371004"
+      "title": "Event Title",
+      "url": "https://www.more.com/...",
+      "imageUrl": "https://...",
+      "imageBase64": "...",
+      "locationName": "Venue Name, Athens",
+      "about": "Event description...",
+      "date": "01/06/2025 - 30/06/2025",
+      "duration": "1:30",
+      "mapUrl": "https://maps.google.com/...",
+      "coordinates": "37.9755, 23.7348"
     }
   ]
 }
-
 ```
-## 📁 Project Structure
- * Controllers/ScraperController.cs: The HTTP entry point exposing the POST endpoint.
- * Services/ScraperService.cs: The core engine containing all Playwright automation, DOM traversal, and scraping logic.
- * Program.cs: Setup for Dependency Injection, Swagger, and App configuration.
-## ⚠️ Disclaimer
-This project is intended for educational purposes. Web scraping should be done responsibly and in accordance with the target website's Terms of Service and robots.txt. The developers assume no liability for misuse of this software.
-## 📄 License
-This project is licensed under the MIT License - see the LICENSE file for details.
-*** 
+
+---
+
+## Supported Filter Values
+
+### Categories (`category`)
+
+| Greek Name | Description |
+|---|---|
+| Δράμα | Drama |
+| Κωμωδία | Comedy |
+| Μουσικό | Musical |
+| Μουσικό Θέατρο | Music Theater |
+| Παιδικά | For Kids |
+| Αρχαίο Δράμα | Ancient Drama |
+| Τραγωδία | Tragedy |
+| Κλασικό έργο | Classical Work |
+| Κοινωνικό Δράμα | Social Drama |
+| Μαύρη Κωμωδία | Black Comedy |
+| Μονόλογος | Monologue |
+| Παρωδία | Parody |
+| Ιστορικό | Historical |
+| Βιογραφία | Biography |
+| Αυτοσχεδιασμός | Improv |
+| Διαδραστικό | Interactive |
+| Performance | Performance |
+| Επιθεώρηση | Revue |
+| Magic Show | Magic Show |
+| Άλλο | Other |
+
+### Locations (`location`)
+
+| Value | Region |
+|---|---|
+| Αττική | Attica (Athens) |
+| Θεσσαλονίκη | Thessaloniki |
+| Υπόλοιπη Ελλάδα | Rest of Greece |
+| Κρήτη / Ηράκλειο | Crete / Heraklion |
+| Αχαΐα | Achaea |
+| Ιόνια / Κέρκυρα | Ionian / Corfu |
+| Ήπειρος / Ιωάννινα | Epirus / Ioannina |
+| Θεσσαλία / Λάρισα | Thessaly / Larissa |
+| Δωδεκάνησα | Dodecanese |
+| Κυκλάδες | Cyclades |
+| Πανελλαδική Περιοδεία | Nationwide Tour |
+
+> Full location list available in `ScraperService.cs` → `LocationMap`.
+
+---
+
+## Configuration
+
+The default target URL is configured in `appsettings.json`:
+
+```json
+{
+  "ScraperSettings": {
+    "TargetUrl": "https://www.more.com/el/theater/"
+  }
+}
+```
+
+---
+
+## Notes
+
+- The scraper opens a **non-headless** browser by default (visible window). To run headlessly, set `Headless = true` in `ScraperService.cs`.
+- Scraping time scales with the number of events found — each event detail page is opened in a new tab.
+- The API handles cookie banners and region selection dialogs automatically.
+
+---
+
+## License
+
+MIT
