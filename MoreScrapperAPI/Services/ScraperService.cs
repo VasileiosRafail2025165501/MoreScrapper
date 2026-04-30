@@ -1,4 +1,5 @@
 using Microsoft.Playwright;
+using System.Text.RegularExpressions;
 
 namespace PlaywrightScraperAPI.Services;
 
@@ -146,6 +147,7 @@ public class ScraperService
         });
 
         var page = await browser.NewPageAsync();
+        
         // Use DOMContentLoaded to speed up initial load and prevent timeouts from hanging network requests
         await page.GotoAsync(_targetUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
@@ -255,7 +257,7 @@ public class ScraperService
         if (urls.Count == 0)
         {
             Console.WriteLine("[INFO] No results found.");
-            return new ScrapeResult { Url = page.Url, Message = "Δεν βρέθηκαν αποτελέσματα", TotalEventsScraped = 0 };
+            return new ScrapeResult { Url = page.Url, Message = "No results found", TotalEventsScraped = 0 };
         }
 
         var extractedEvents = new List<EventDetail>();
@@ -273,7 +275,7 @@ public class ScraperService
                 var newrejectBtn = newTab.Locator("a.cc-btn--reject");
                 if (await newrejectBtn.IsVisibleAsync()) await newrejectBtn.ClickAsync();
 
-                // Smart Wait: Wait for vital elements to attach to the DOM (Max 5 seconds)
+                // SMART WAIT: Wait for vital elements to attach to the DOM (Max 5 seconds)
                 try 
                 {
                     await newTab.WaitForSelectorAsync("#r_descSummary, .r_mainInfoText, .r_descriptionText", new PageWaitForSelectorOptions { Timeout = 5000, State = WaitForSelectorState.Attached });
@@ -304,6 +306,7 @@ public class ScraperService
                 }
                 else
                 {
+                    // Fallback: If image is dynamically loaded via srcset in the <source> tag
                     var sourceLoc = newTab.Locator(".r_banner_img_container picture source[srcset]");
                     if (await sourceLoc.CountAsync() > 0)
                     {
@@ -313,8 +316,20 @@ public class ScraperService
                 }
                 string imageUrl = !string.IsNullOrEmpty(srcValue) ? (srcValue.StartsWith("http") ? srcValue : $"https://www.more.com{srcValue}") : "";
 
-                // Base64 image conversion (optional, kept empty here to minimize payload size)
+                // Convert Image to Base64
                 string imageBase64 = string.Empty;
+                if (!string.IsNullOrEmpty(imageUrl))
+                {
+                    try
+                    {
+                        byte[] imageBytes = await _httpClient.GetByteArrayAsync(imageUrl);
+                        imageBase64 = Convert.ToBase64String(imageBytes);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[WARNING] Failed to download image for base64 at {url}: {ex.Message}");
+                    }
+                }
 
                 // 3. LOCATION
                 var locationLoc = newTab.Locator(".r_mainInfoText, .venue-info, .event-venue"); 
@@ -326,7 +341,7 @@ public class ScraperService
                         locationStr = await locationLoc.First.TextContentAsync() ?? "";
                 }
                 
-                // EXPAND DETAILS IF "SEE MORE" BUTTON EXISTS
+                // CLICK ON "SEE MORE" BUTTON IF EXISTS
                 var viewMoreBtn = newTab.Locator(".r_viewMoreButton");
                 if (await viewMoreBtn.IsVisibleAsync())
                 {
@@ -336,8 +351,7 @@ public class ScraperService
                     } catch { } 
                 }
 
-                // 4. ABOUT (DESCRIPTION)
-                // Use a priority array to pinpoint the exact container and avoid empty hidden divs
+                // 4. ABOUT (DESCRIPTION) - Using strict priority array
                 string[] aboutSelectors = new[] { "#r_descSummary", "#r_summaryText", ".r_descriptionCustomText", ".r_descriptionExpanded", ".r_descriptionText", ".r_description", ".description-text" };
                 string aboutStr = string.Empty;
 
@@ -356,7 +370,7 @@ public class ScraperService
                     }
                 }
                 
-                // --- CLEANUP TEXT AND REMOVE CAST/CREDITS ---
+                // --- TEXT CLEANUP AND "CAST/CREDITS" REMOVAL ---
                 aboutStr = aboutStr.Replace("Δες λιγότερα", "").Trim();
                 
                 // Greek keyword for "Cast/Credits"
@@ -393,7 +407,7 @@ public class ScraperService
                 if (!string.IsNullOrEmpty(mapUrl))
                 {
                     // CASE 1: Standard Google Maps URL containing coordinates directly (e.g. ll= or @)
-                    var matchSimple = System.Text.RegularExpressions.Regex.Match(mapUrl, @"(?:ll=|@)(-?\d+\.\d+)[,%](-?\d+\.\d+)");
+                    var matchSimple = Regex.Match(mapUrl, @"(?:ll=|@)(-?\d+\.\d+)[,%](-?\d+\.\d+)");
                     if (matchSimple.Success)
                     {
                         coordinates = $"{matchSimple.Groups[1].Value}, {matchSimple.Groups[2].Value}";
@@ -401,8 +415,8 @@ public class ScraperService
                     else
                     {
                         // CASE 2: Google Maps Embed URL where coordinates are prefixed by !2d (Lng) and !3d (Lat)
-                        var matchEmbedLon = System.Text.RegularExpressions.Regex.Match(mapUrl, @"!2d(-?\d+\.\d+)");
-                        var matchEmbedLat = System.Text.RegularExpressions.Regex.Match(mapUrl, @"!3d(-?\d+\.\d+)");
+                        var matchEmbedLon = Regex.Match(mapUrl, @"!2d(-?\d+\.\d+)");
+                        var matchEmbedLat = Regex.Match(mapUrl, @"!3d(-?\d+\.\d+)");
 
                         if (matchEmbedLon.Success && matchEmbedLat.Success)
                         {
