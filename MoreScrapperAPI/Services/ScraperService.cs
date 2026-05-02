@@ -1,4 +1,5 @@
 using Microsoft.Playwright;
+using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
 
 namespace PlaywrightScraperAPI.Services;
@@ -7,6 +8,14 @@ public class ScrapeRequest
 {
     public string? Location { get; set; }
     public string? Category { get; set; }
+}
+
+public record Showtime
+{
+    public string Date { get; init; } = string.Empty;
+    public string Time { get; init; } = string.Empty;
+    public string Availability { get; init; } = string.Empty;
+    public string VenueName { get; init; } = string.Empty;
 }
 
 public record EventDetail
@@ -21,6 +30,7 @@ public record EventDetail
     public string Duration { get; init; } = string.Empty;
     public string MapUrl { get; init; } = string.Empty;
     public string Coordinates { get; init; } = string.Empty;
+    public List<Showtime> Showtimes { get; init; } = new();
 }
 
 public record ScrapeResult
@@ -36,7 +46,15 @@ public class ScraperService
     private readonly string _targetUrl;
     private static readonly HttpClient _httpClient = new HttpClient();
 
-    // Mapping categories to their respective CSS classes on the target website
+    // Max parallel tabs — tune this up/down based on your machine
+    private const int MaxParallelTabs = 8;
+
+    // Strips embedded base64 data URIs from description text
+    private static readonly Regex Base64DataUriRegex = new Regex(
+        @"data:[a-zA-Z0-9+/]+;base64,[A-Za-z0-9+/=]+",
+        RegexOptions.Compiled
+    );
+
     private static readonly Dictionary<string, string> CategoryMap = new(StringComparer.OrdinalIgnoreCase)
     {
         { "Δράμα", "theaterdrama" },
@@ -68,7 +86,6 @@ public class ScraperService
         { "Magic Show", "theatermagicshow" },
     };
 
-    // Mapping locations to their respective CSS classes
     private static readonly Dictionary<string, string> LocationMap = new(StringComparer.OrdinalIgnoreCase)
     {
         { "Αττική", "area1" },
@@ -137,25 +154,21 @@ public class ScraperService
                 ? $".{loc}"
                 : string.Empty;
 
-        string finalSelector = $"article:visible{categoryClass}{locationClass} a#ItemLink";
-        Console.WriteLine($"Using selector: {finalSelector}");
+        Console.WriteLine($"Using selector: article:visible{categoryClass}{locationClass} a#ItemLink");
 
         using var playwright = await Playwright.CreateAsync();
         await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
         {
-            Headless = false 
+            Headless = false
         });
 
         var page = await browser.NewPageAsync();
-        
-        // Use DOMContentLoaded to speed up initial load and prevent timeouts from hanging network requests
+
         await page.GotoAsync(_targetUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
-        // Handle cookie consent popup
         var rejectBtn = page.Locator("a.cc-btn--reject");
         if (await rejectBtn.IsVisibleAsync()) await rejectBtn.ClickAsync();
 
-        // Select the appropriate language/region if prompted
         var greeceLink = page.Locator("#PageContent_CSel_GR_Select");
         if (await greeceLink.IsVisibleAsync())
         {
@@ -169,49 +182,8 @@ public class ScraperService
 
         await Task.Delay(3000);
 
-        // Apply category filter if requested
-        if (!string.IsNullOrEmpty(request.Category))
-        {
-            await page.Locator("a.genreDropDown").First.ClickAsync();
-            await Task.Delay(800); 
-
-            var categoryOption = page.Locator("#genre ul.mainGenres li a")
-                .GetByText(request.Category, new() { Exact = true });
-
-            if (await categoryOption.CountAsync() > 0)
-            {
-                await categoryOption.First.ClickAsync(new() { Force = true });
-                await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
-            }
-        }
-
-        await Task.Delay(4000);
-
-        // Apply location filter if requested
-        if (!string.IsNullOrEmpty(request.Location))
-        {
-            await page.Locator("a.locationDropDown").First.ClickAsync();
-            var regionsBtn = page.Locator("a[href='#location-cities']").Filter(new() { HasText = "Περιοχές" });
-            await regionsBtn.WaitForAsync(new() { State = WaitForSelectorState.Visible });
-            await regionsBtn.ClickAsync();
-
-            var cityOptions = page.Locator("#location-cities ul.mm-listview a")
-                .GetByText(request.Location, new() { Exact = true });
-
-            int cityCount = await cityOptions.CountAsync();
-            for (int i = 0; i < cityCount; i++)
-            {
-                await cityOptions.Nth(i).ClickAsync(new() { Force = true });
-                await Task.Delay(400);
-            }
-
-            await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
-        }
-
-        await Task.Delay(3000);
-
-        string categoryClassName = categoryClass.TrimStart('.'); 
-        string locationClassName = locationClass.TrimStart('.'); 
+        string categoryClassName = categoryClass.TrimStart('.');
+        string locationClassName = locationClass.TrimStart('.');
 
         var allArticles = page.Locator("article");
         int total = await allArticles.CountAsync();
@@ -219,7 +191,6 @@ public class ScraperService
 
         var urls = new List<string>();
 
-        // Extract URLs for all matching articles
         for (int i = 0; i < total; i++)
         {
             var article = allArticles.Nth(i);
@@ -252,7 +223,7 @@ public class ScraperService
             Console.WriteLine($"[MATCH] {fullUrl}");
         }
 
-        Console.WriteLine($"--- Found {urls.Count} matching events ---");
+        Console.WriteLine($"--- Found {urls.Count} matching events. Starting parallel scrape (max {MaxParallelTabs} concurrent tabs) ---");
 
         if (urls.Count == 0)
         {
@@ -260,29 +231,35 @@ public class ScraperService
             return new ScrapeResult { Url = page.Url, Message = "No results found", TotalEventsScraped = 0 };
         }
 
-        var extractedEvents = new List<EventDetail>();
+        // Thread-safe collection for results
+        var results = new ConcurrentBag<(int Index, EventDetail Detail)>();
 
-        // Process each extracted URL
-        foreach (var url in urls)
+        // Semaphore limits how many tabs are open/processing at the same time
+        using var semaphore = new SemaphoreSlim(MaxParallelTabs);
+
+        var tasks = urls.Select((url, index) => Task.Run(async () =>
         {
-            Console.WriteLine($"Opening: {url}");
+            await semaphore.WaitAsync();
             var newTab = await browser.NewPageAsync();
             try
             {
-                // Wait for DOMContentLoaded to prevent timeouts on pages with hanging external requests
+                Console.WriteLine($"[{index + 1}/{urls.Count}] Opening: {url}");
+
                 await newTab.GotoAsync(url, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-                
-                var newrejectBtn = newTab.Locator("a.cc-btn--reject");
-                if (await newrejectBtn.IsVisibleAsync()) await newrejectBtn.ClickAsync();
 
-                // SMART WAIT: Wait for vital elements to attach to the DOM (Max 5 seconds)
-                try 
+                var newRejectBtn = newTab.Locator("a.cc-btn--reject");
+                if (await newRejectBtn.IsVisibleAsync()) await newRejectBtn.ClickAsync();
+
+                try
                 {
-                    await newTab.WaitForSelectorAsync("#r_descSummary, .r_mainInfoText, .r_descriptionText", new PageWaitForSelectorOptions { Timeout = 5000, State = WaitForSelectorState.Attached });
-                } 
-                catch { } // Proceed even if it times out to avoid breaking the entire loop
+                    await newTab.WaitForSelectorAsync(
+                        "#r_descSummary, .r_mainInfoText, .r_descriptionText",
+                        new PageWaitForSelectorOptions { Timeout = 5000, State = WaitForSelectorState.Attached }
+                    );
+                }
+                catch { }
 
-                // 1. TITLE (CLEANED)
+                // 1. TITLE
                 var titleLoc = newTab.Locator("#r_maininfo h1, h1");
                 string eventTitle = string.Empty;
                 if (await titleLoc.CountAsync() > 0)
@@ -291,13 +268,11 @@ public class ScraperService
                 }
                 else
                 {
-                    // Fallback to page title, stripped of generic SEO text
                     eventTitle = await newTab.TitleAsync();
                     eventTitle = eventTitle.Split('|')[0];
                 }
 
                 // 2. IMAGE
-                // Use strict selectors to avoid hidden/lazy-loaded images without a valid source
                 var imgLoc = newTab.Locator(".r_banner_img_container img[src], .r_banner picture img[src], .header-image img[src]");
                 string srcValue = string.Empty;
                 if (await imgLoc.CountAsync() > 0)
@@ -306,17 +281,17 @@ public class ScraperService
                 }
                 else
                 {
-                    // Fallback: If image is dynamically loaded via srcset in the <source> tag
                     var sourceLoc = newTab.Locator(".r_banner_img_container picture source[srcset]");
                     if (await sourceLoc.CountAsync() > 0)
                     {
                         srcValue = await sourceLoc.First.GetAttributeAsync("srcset") ?? "";
-                        srcValue = srcValue.Split(' ')[0]; 
+                        srcValue = srcValue.Split(' ')[0];
                     }
                 }
-                string imageUrl = !string.IsNullOrEmpty(srcValue) ? (srcValue.StartsWith("http") ? srcValue : $"https://www.more.com{srcValue}") : "";
+                string imageUrl = !string.IsNullOrEmpty(srcValue)
+                    ? (srcValue.StartsWith("http") ? srcValue : $"https://www.more.com{srcValue}")
+                    : "";
 
-                // Convert Image to Base64
                 string imageBase64 = string.Empty;
                 if (!string.IsNullOrEmpty(imageUrl))
                 {
@@ -327,77 +302,102 @@ public class ScraperService
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"[WARNING] Failed to download image for base64 at {url}: {ex.Message}");
+                        Console.WriteLine($"[WARNING] Failed to download image at {url}: {ex.Message}");
                     }
                 }
 
                 // 3. LOCATION
-                var locationLoc = newTab.Locator(".r_mainInfoText, .venue-info, .event-venue"); 
+                var locationLoc = newTab.Locator(".r_mainInfoLocation .r_mainInfoText");
                 string locationStr = string.Empty;
                 if (await locationLoc.CountAsync() > 0)
                 {
                     locationStr = await locationLoc.First.InnerTextAsync() ?? "";
-                    if (string.IsNullOrWhiteSpace(locationStr)) 
+                    if (string.IsNullOrWhiteSpace(locationStr))
                         locationStr = await locationLoc.First.TextContentAsync() ?? "";
                 }
-                
-                // CLICK ON "SEE MORE" BUTTON IF EXISTS
+
+                // CLICK "SEE MORE" IF EXISTS
                 var viewMoreBtn = newTab.Locator(".r_viewMoreButton");
                 if (await viewMoreBtn.IsVisibleAsync())
                 {
-                    try {
-                        await viewMoreBtn.ClickAsync();
-                        await Task.Delay(500); 
-                    } catch { } 
+                    try { await viewMoreBtn.ClickAsync(); await Task.Delay(500); } catch { }
                 }
 
-                // 4. ABOUT (DESCRIPTION) - Using strict priority array
-                string[] aboutSelectors = new[] { "#r_descSummary", "#r_summaryText", ".r_descriptionCustomText", ".r_descriptionExpanded", ".r_descriptionText", ".r_description", ".description-text" };
+                // 4. ABOUT (DESCRIPTION)
+                string[] aboutSelectors = new[]
+                {
+                    "#r_descSummary",
+                    "#r_summaryText",
+                    ".r_descriptionCustomText",
+                    ".r_descriptionExpanded",
+                    ".r_descriptionText",
+                    ".r_description",
+                    ".description-text"
+                };
                 string aboutStr = string.Empty;
 
                 foreach (var selector in aboutSelectors)
                 {
-                    var location = newTab.Locator(selector);
-                    if (await location.CountAsync() > 0)
+                    var loc = newTab.Locator(selector);
+                    if (await loc.CountAsync() > 0)
                     {
-                        aboutStr = await location.First.InnerTextAsync() ?? "";
+                        aboutStr = await loc.First.InnerTextAsync() ?? "";
                         if (string.IsNullOrWhiteSpace(aboutStr))
-                            aboutStr = await location.First.TextContentAsync() ?? "";
-
-                        // Break the loop once we successfully find populated text
-                        if (!string.IsNullOrWhiteSpace(aboutStr))
-                            break; 
+                            aboutStr = await loc.First.TextContentAsync() ?? "";
+                        if (!string.IsNullOrWhiteSpace(aboutStr)) break;
                     }
                 }
-                
-                // --- TEXT CLEANUP AND "CAST/CREDITS" REMOVAL ---
+
                 aboutStr = aboutStr.Replace("Δες λιγότερα", "").Trim();
-                
-                // Greek keyword for "Cast/Credits"
+                aboutStr = Base64DataUriRegex.Replace(aboutStr, "").Trim();
                 int castIndex = aboutStr.IndexOf("Συντελεστές", StringComparison.OrdinalIgnoreCase);
                 if (castIndex >= 0)
-                {
                     aboutStr = aboutStr.Substring(0, castIndex).Trim();
-                }
-                
+
                 // 5. DATE
                 var dateLoc = newTab.Locator(".r_mainInfoDate .r_mainInfoText");
-                string dateStr = await dateLoc.CountAsync() > 0 ? await dateLoc.First.InnerTextAsync() : "";
+                string dateStr = await dateLoc.CountAsync() > 0
+                    ? await dateLoc.First.InnerTextAsync()
+                    : "";
 
                 // 6. DURATION
-                var durationLoc = newTab.Locator(".r_additionalInfoTitle").Filter(new LocatorFilterOptions { HasText = "Διάρκεια" }).Locator("+ div");
-                string durationStr = await durationLoc.CountAsync() > 0 ? await durationLoc.First.InnerTextAsync() : "";
+                string durationStr = string.Empty;
+                var durationWrapper = newTab
+                    .Locator(".css-1v7fkxn")
+                    .Filter(new LocatorFilterOptions { HasText = "Διάρκεια" });
+
+                if (await durationWrapper.CountAsync() > 0)
+                {
+                    var durationText = durationWrapper.First.Locator("div p div, div p, .r_additionalText");
+                    if (await durationText.CountAsync() > 0)
+                        durationStr = (await durationText.First.InnerTextAsync()).Trim();
+                }
 
                 // 7. MAP URL AND COORDINATES
-                var mapLoc = newTab.Locator("a[aria-label*='Open in Maps'], a[title*='Open in Maps'], a[href*='maps.google'], a:has-text('Χάρτης')");
+                var mapLoc = newTab.Locator(
+                    "a[href*='maps.google'], a[title*='Χάρτες'], a[title*='Open in Maps'], a[aria-label*='Open in Maps']"
+                );
                 string mapUrl = string.Empty;
                 string coordinates = string.Empty;
 
                 if (await mapLoc.CountAsync() > 0)
-                {
                     mapUrl = await mapLoc.First.GetAttributeAsync("href") ?? "";
+
+                if (string.IsNullOrEmpty(mapUrl))
+                {
+                    var inlineMapLoc = newTab.Locator(".events-container__item-map a[href*='maps']");
+                    if (await inlineMapLoc.CountAsync() > 0)
+                        mapUrl = await inlineMapLoc.First.GetAttributeAsync("href") ?? "";
                 }
-                else 
+
+                if (string.IsNullOrEmpty(mapUrl))
+                {
+                    var googleMapsIframe = newTab.Locator("iframe.r_googleMaps[src*='maps']");
+                    if (await googleMapsIframe.CountAsync() > 0)
+                        mapUrl = await googleMapsIframe.First.GetAttributeAsync("src") ?? "";
+                }
+
+                if (string.IsNullOrEmpty(mapUrl))
                 {
                     var iframeLoc = newTab.Locator("iframe[src*='maps']");
                     if (await iframeLoc.CountAsync() > 0)
@@ -406,7 +406,6 @@ public class ScraperService
 
                 if (!string.IsNullOrEmpty(mapUrl))
                 {
-                    // CASE 1: Standard Google Maps URL containing coordinates directly (e.g. ll= or @)
                     var matchSimple = Regex.Match(mapUrl, @"(?:ll=|@)(-?\d+\.\d+)[,%](-?\d+\.\d+)");
                     if (matchSimple.Success)
                     {
@@ -414,33 +413,93 @@ public class ScraperService
                     }
                     else
                     {
-                        // CASE 2: Google Maps Embed URL where coordinates are prefixed by !2d (Lng) and !3d (Lat)
-                        var matchEmbedLon = Regex.Match(mapUrl, @"!2d(-?\d+\.\d+)");
-                        var matchEmbedLat = Regex.Match(mapUrl, @"!3d(-?\d+\.\d+)");
-
-                        if (matchEmbedLon.Success && matchEmbedLat.Success)
-                        {
-                            // Reorder extracted values to follow standard Latitude, Longitude format
-                            coordinates = $"{matchEmbedLat.Groups[1].Value}, {matchEmbedLon.Groups[1].Value}";
-                        }
+                        var matchLon = Regex.Match(mapUrl, @"!2d(-?\d+\.\d+)");
+                        var matchLat = Regex.Match(mapUrl, @"!3d(-?\d+\.\d+)");
+                        if (matchLon.Success && matchLat.Success)
+                            coordinates = $"{matchLat.Groups[1].Value}, {matchLon.Groups[1].Value}";
                     }
                 }
 
-                extractedEvents.Add(new EventDetail
+                if (string.IsNullOrEmpty(coordinates))
+                {
+                    var bookBtn = newTab.Locator("a[vanuelat][vanuelon]");
+                    if (await bookBtn.CountAsync() > 0)
+                    {
+                        string lat = await bookBtn.First.GetAttributeAsync("vanuelat") ?? "";
+                        string lon = await bookBtn.First.GetAttributeAsync("vanuelon") ?? "";
+                        if (!string.IsNullOrEmpty(lat) && !string.IsNullOrEmpty(lon))
+                            coordinates = $"{lat.Trim()}, {lon.Trim()}";
+                    }
+                }
+
+                // 8. SHOWTIMES
+                var extractedShowtimes = new List<Showtime>();
+                var eventItems = newTab.Locator(".events-container__item");
+                int itemsCount = await eventItems.CountAsync();
+
+                for (int j = 0; j < itemsCount; j++)
+                {
+                    var item = eventItems.Nth(j);
+
+                    var itemDateLoc = item.Locator(".events-container__item-date");
+                    string showDate = await itemDateLoc.CountAsync() > 0
+                        ? await itemDateLoc.First.InnerTextAsync()
+                        : "";
+
+                    var itemTimeLoc = item.Locator(".events-container__item-time");
+                    string showTime = await itemTimeLoc.CountAsync() > 0
+                        ? await itemTimeLoc.First.InnerTextAsync()
+                        : "";
+
+                    var bookBtnLoc = item.Locator("a[venuename]");
+                    string venueName = await bookBtnLoc.CountAsync() > 0
+                        ? await bookBtnLoc.First.GetAttributeAsync("venuename") ?? ""
+                        : "";
+
+                    if (string.IsNullOrEmpty(venueName))
+                    {
+                        var venueSpan = item.Locator(".events-container__item-venue");
+                        if (await venueSpan.CountAsync() > 0)
+                            venueName = (await venueSpan.First.InnerTextAsync()).Trim();
+                    }
+
+                    string classAttr = await item.GetAttributeAsync("class") ?? "";
+                    string availability = "Unknown";
+
+                    if (classAttr.Contains("eb-availability--green"))       availability = "Available";
+                    else if (classAttr.Contains("eb-availability--orange"))  availability = "Limited";
+                    else if (classAttr.Contains("eb-availability--red"))     availability = "Few Tickets Left";
+                    else if (classAttr.Contains("eb-availability--soldout")) availability = "Sold Out";
+
+                    if (!string.IsNullOrWhiteSpace(showDate))
+                    {
+                        extractedShowtimes.Add(new Showtime
+                        {
+                            Date = showDate.Trim(),
+                            Time = showTime.Trim(),
+                            Availability = availability,
+                            VenueName = venueName.Trim()
+                        });
+                    }
+                }
+
+                var detail = new EventDetail
                 {
                     Title = eventTitle.Trim(),
                     Url = url,
                     ImageUrl = imageUrl,
-                    ImageBase64 = imageBase64,
+                    // ImageBase64 = imageBase64,
                     LocationName = locationStr.Trim(),
                     About = aboutStr.Trim(),
-                    Date = dateStr.Trim(),          
-                    Duration = durationStr.Trim(),  
-                    MapUrl = mapUrl.Trim(),         
-                    Coordinates = coordinates       
-                });
+                    Date = dateStr.Trim(),
+                    Duration = durationStr.Trim(),
+                    MapUrl = mapUrl.Trim(),
+                    Coordinates = coordinates,
+                    Showtimes = extractedShowtimes
+                };
 
-                Console.WriteLine($"Successfully extracted: {eventTitle.Trim()}");
+                results.Add((index, detail));
+                Console.WriteLine($"[{index + 1}/{urls.Count}] Done: {eventTitle.Trim()}");
             }
             catch (Exception ex)
             {
@@ -448,9 +507,18 @@ public class ScraperService
             }
             finally
             {
-                await newTab.CloseAsync(); 
+                await newTab.CloseAsync();
+                semaphore.Release();
             }
-        }
+        })).ToList();
+
+        await Task.WhenAll(tasks);
+
+        // Re-sort results to match original URL order (parallel execution scrambles order)
+        var extractedEvents = results
+            .OrderBy(r => r.Index)
+            .Select(r => r.Detail)
+            .ToList();
 
         return new ScrapeResult
         {
