@@ -493,7 +493,7 @@ public class ScraperService
                     Title = eventTitle.Trim(),
                     Url = url,
                     ImageUrl = imageUrl,
-                  //  ImageBase64 = imageBase64, // Included
+                    ImageBase64 = imageBase64, 
                     LocationName = locationStr.Trim(),
                     About = aboutStr.Trim(),
                     Date = dateStr.Trim(),
