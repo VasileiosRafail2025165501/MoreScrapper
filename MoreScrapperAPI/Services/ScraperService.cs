@@ -164,7 +164,7 @@ public class ScraperService
 
         var page = await browser.NewPageAsync();
 
-        await page.GotoAsync(_targetUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+        await page.GotoAsync(_targetUrl, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle, Timeout = 60000 });
 
         var rejectBtn = page.Locator("a.cc-btn--reject");
         if (await rejectBtn.IsVisibleAsync()) await rejectBtn.ClickAsync();
@@ -173,11 +173,11 @@ public class ScraperService
         if (await greeceLink.IsVisibleAsync())
         {
             await greeceLink.ClickAsync();
-            await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+            await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
 
             var theaterMenu = page.Locator("#NavBar_rptNavigation_listcontainer_2 a");
             if (await theaterMenu.IsVisibleAsync()) await theaterMenu.ClickAsync();
-            await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+            await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
         }
 
         await Task.Delay(3000);
@@ -231,10 +231,7 @@ public class ScraperService
             return new ScrapeResult { Url = page.Url, Message = "No results found", TotalEventsScraped = 0 };
         }
 
-        // Thread-safe collection for results
         var results = new ConcurrentBag<(int Index, EventDetail Detail)>();
-
-        // Semaphore limits how many tabs are open/processing at the same time
         using var semaphore = new SemaphoreSlim(MaxParallelTabs);
 
         var tasks = urls.Select((url, index) => Task.Run(async () =>
@@ -245,19 +242,27 @@ public class ScraperService
             {
                 Console.WriteLine($"[{index + 1}/{urls.Count}] Opening: {url}");
 
-                await newTab.GotoAsync(url, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+                // Wait for NetworkIdle instead of DOMContentLoaded to ensure dynamic components load
+                await newTab.GotoAsync(url, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle, Timeout = 60000 });
 
                 var newRejectBtn = newTab.Locator("a.cc-btn--reject");
-                if (await newRejectBtn.IsVisibleAsync()) await newRejectBtn.ClickAsync();
+                if (await newRejectBtn.IsVisibleAsync()) 
+                {
+                    try { await newRejectBtn.ClickAsync(new LocatorClickOptions { Timeout = 2000 }); } catch { }
+                }
 
+                // Explicit wait to ensure the wrapper elements are definitely in the DOM
                 try
                 {
                     await newTab.WaitForSelectorAsync(
-                        "#r_descSummary, .r_mainInfoText, .r_descriptionText",
-                        new PageWaitForSelectorOptions { Timeout = 5000, State = WaitForSelectorState.Attached }
+                        ".r_maininfo, .r_summaryText, .r_descriptionText",
+                        new PageWaitForSelectorOptions { Timeout = 10000, State = WaitForSelectorState.Attached }
                     );
+                    
+                    // Give nested iframes (map) and client-side schedule components a moment to finish hydrating
+                    await Task.Delay(3000);
                 }
-                catch { }
+                catch { Console.WriteLine($"[WARNING] Timeout waiting for main content selectors on {url}"); }
 
                 // 1. TITLE
                 var titleLoc = newTab.Locator("#r_maininfo h1, h1");
@@ -488,7 +493,7 @@ public class ScraperService
                     Title = eventTitle.Trim(),
                     Url = url,
                     ImageUrl = imageUrl,
-                    // ImageBase64 = imageBase64,
+                  //  ImageBase64 = imageBase64, // Included
                     LocationName = locationStr.Trim(),
                     About = aboutStr.Trim(),
                     Date = dateStr.Trim(),
